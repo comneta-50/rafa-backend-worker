@@ -12,6 +12,7 @@ import {
 	RepoItem,
 	ActivityLog,
 } from "./data";
+import { getDb, initDbSchema } from "./db";
 
 // In-memory runtime state
 let agents = [...initialAgents];
@@ -46,15 +47,73 @@ export default {
 
 		// 1. Root & Health Check
 		if (path === "/" || path === "/health") {
+			const sql = getDb(env);
+			let dbStatus = "not_configured";
+			let dbNow = null;
+
+			if (sql) {
+				try {
+					const res = await sql`SELECT NOW() as now;`;
+					dbStatus = "connected";
+					dbNow = res[0]?.now;
+				} catch (err: any) {
+					dbStatus = `error: ${err.message}`;
+				}
+			}
+
 			return json({
 				status: "ok",
 				service: "rafa-backend-worker",
 				aiConnected: true,
+				database: {
+					status: dbStatus,
+					engine: "Neon PostgreSQL",
+					currentTime: dbNow,
+				},
 				timestamp: new Date().toISOString(),
 			});
 		}
 
-		// 2. Metrics / Overview API
+		// 1b. Database Init Endpoint (/api/db/init)
+		if (path === "/api/db/init" && method === "POST") {
+			const sql = getDb(env);
+			if (!sql) return json({ error: "DATABASE_URL not configured" }, 500);
+
+			try {
+				await initDbSchema(sql);
+				return json({ success: true, message: "Neon PostgreSQL schema initialized successfully!" });
+			} catch (err: any) {
+				return json({ success: false, error: err.message }, 500);
+			}
+		}
+
+		// 2. Dashboard Unified Endpoint (/api/dashboard)
+		if (path === "/api/dashboard" && method === "GET") {
+			const activeAgentsList = agents.filter((a) => a.status !== "Offline");
+			const runningJobsCount = jobs.filter((j) => j.status === "fixing" || j.status === "testing").length;
+			const completedJobsCount = jobs.filter((j) => j.status === "completed").length;
+
+			return json({
+				metrics: {
+					activeJobsCount: jobs.length,
+					inProgressCount: runningJobsCount,
+					onlineAgentsCount: activeAgentsList.length,
+					totalAgentsCount: agents.length,
+					successRate: "98.6%",
+					successRateSubtitle: "Over past 140 PRs",
+					avgResolutionTime: "4m 12s",
+					resolutionDelta: "-35s vs last week",
+					clusterHealth: "Healthy",
+					latency: "24ms",
+				},
+				recentJobs: jobs.slice(0, 10),
+				agentsFleet: agents,
+				recentActivity: logs.slice(0, 5),
+				pendingReviewsCount: reviews.length,
+			});
+		}
+
+		// 2b. Metrics / Overview API
 		if (path === "/api/metrics" && method === "GET") {
 			const activeAgents = agents.filter((a) => a.status !== "Offline").length;
 			const totalJobs = jobs.length;
@@ -78,29 +137,41 @@ export default {
 		// 3. Jobs API (/api/jobs)
 		if (path === "/api/jobs") {
 			if (method === "GET") {
+				const status = url.searchParams.get("status");
+				if (status && status !== "all") {
+					return json(jobs.filter((j) => j.status === status));
+				}
 				return json(jobs);
 			}
 
 			if (method === "POST") {
 				const body: any = await request.json().catch(() => ({}));
 				const newJob: Job = {
-					id: `JOB-${Math.floor(1000 + Math.random() * 9000)}`,
+					id: `JOB-${Math.floor(4100 + Math.random() * 900)}`,
 					orderId: body.orderId,
-					repo: body.repo || "comneta-50/site-ai-company",
-					branch: body.branch || "ai-auto-patch",
+					repo: (body.repo || "comneta-50/site-ai-company").replace("https://github.com/", ""),
+					branch: body.branch || (body.orderId ? `ai-fix/${body.orderId.toLowerCase()}` : "ai-auto-patch"),
 					title: body.title || "Bugfix task",
 					agent: body.agent || "AutoFix Engineer",
 					status: "fixing",
 					statusLabel: "Fixing",
 					time: "Just now",
-					progress: 15,
+					progress: body.progress || 20,
 					logs: [
 						`Job started: ${body.title || "Bugfix task"}`,
+						body.orderId ? `Ingested from Client Order: ${body.orderId}` : "Ingested from Dispatch Console",
 						`Assigned to ${body.agent || "AutoFix Engineer"}`,
 						"Cloning repository & analyzing AST tree...",
 					],
 				};
 				jobs = [newJob, ...jobs];
+
+				// Increment activeJobs of assigned agent
+				const assignedAgent = agents.find((a) => a.name === newJob.agent);
+				if (assignedAgent) {
+					assignedAgent.activeJobs += 1;
+					assignedAgent.status = "Busy";
+				}
 
 				// Record activity log
 				logs.unshift({
@@ -115,6 +186,37 @@ export default {
 
 				return json({ success: true, job: newJob }, 201);
 			}
+		}
+
+		// Specialized Job Action: Retry / Re-trigger job
+		if (path.match(/^\/api\/jobs\/[^/]+\/retry$/) && method === "POST") {
+			const id = path.split("/")[3];
+			const jobIndex = jobs.findIndex((j) => j.id === id);
+			if (jobIndex === -1) return json({ error: "Job not found" }, 404);
+
+			jobs[jobIndex] = {
+				...jobs[jobIndex],
+				status: "fixing",
+				statusLabel: "Fixing",
+				progress: 15,
+				logs: [
+					...(jobs[jobIndex].logs || []),
+					`Job re-triggered at ${new Date().toLocaleTimeString("id-ID")}`,
+					"Re-running unit test suites and analyzer AST pass...",
+				],
+			};
+
+			logs.unshift({
+				id: `LOG-${Math.floor(1000 + Math.random() * 9000)}`,
+				timestamp: new Date().toLocaleTimeString("id-ID"),
+				level: "info",
+				agent: jobs[jobIndex].agent,
+				repo: jobs[jobIndex].repo,
+				message: `Job ${id} re-triggered and returned to execution queue`,
+				duration: "0.2s",
+			});
+
+			return json({ success: true, job: jobs[jobIndex] });
 		}
 
 		// Single Job Actions (/api/jobs/:id)
@@ -135,9 +237,14 @@ export default {
 				jobs[jobIndex] = { ...jobs[jobIndex], ...body };
 				return json({ success: true, job: jobs[jobIndex] });
 			}
+
+			if (method === "DELETE") {
+				jobs = jobs.filter((j) => j.id !== id);
+				return json({ success: true, message: `Job ${id} deleted` });
+			}
 		}
 
-		// 4. Orders API (/api/orders)
+		// 4. Client Orders API (/api/orders)
 		if (path === "/api/orders") {
 			if (method === "GET") {
 				return json(orders);
@@ -147,22 +254,133 @@ export default {
 				const body: any = await request.json().catch(() => ({}));
 				const newOrder: LifecycleOrder = {
 					id: `ORD-${Math.floor(700 + Math.random() * 200)}`,
-					clientName: body.clientName || "Anonymous Client",
-					clientEmail: body.clientEmail || "client@example.com",
+					clientName: body.clientName || body.clientRef || "Anonymous Client",
+					clientEmail: body.clientEmail || "client@contact.com",
 					packageType: body.packageType || "Standard Patch",
 					feeAmount: body.feeAmount || "$250.00",
 					bugDescription: body.bugDescription || "Bug analysis needed",
-					repoUrl: body.repoUrl || "org/repo",
+					repoUrl: (body.repoUrl || "org/repo").replace("https://github.com/", ""),
 					branchName: `ai-fix/ord-${Math.floor(100 + Math.random() * 900)}`,
 					status: "order_created",
-					retentionExpires: "7 Hari lagi",
+					retentionExpires: "Menunggu koneksi repo",
 					workspaceDestroyed: false,
 				};
 				orders = [newOrder, ...orders];
+
+				logs.unshift({
+					id: `LOG-${Math.floor(1000 + Math.random() * 9000)}`,
+					timestamp: new Date().toLocaleTimeString("id-ID"),
+					level: "info",
+					agent: "Client Intake Bot",
+					repo: newOrder.repoUrl,
+					message: `Client Order ${newOrder.id} created for ${newOrder.clientName}`,
+					duration: "0.1s",
+				});
+
 				return json({ success: true, order: newOrder }, 201);
 			}
 		}
 
+		// Specialized Order Actions
+		// Connect repo: POST /api/orders/:id/connect-repo
+		if (path.match(/^\/api\/orders\/[^/]+\/connect-repo$/) && method === "POST") {
+			const id = path.split("/")[3];
+			const orderIndex = orders.findIndex((o) => o.id === id);
+			if (orderIndex === -1) return json({ error: "Order not found" }, 404);
+
+			orders[orderIndex] = {
+				...orders[orderIndex],
+				status: "repo_connected",
+				retentionExpires: "7 Hari (Ephemeral)",
+			};
+
+			logs.unshift({
+				id: `LOG-${Math.floor(1000 + Math.random() * 9000)}`,
+				timestamp: new Date().toLocaleTimeString("id-ID"),
+				level: "info",
+				agent: "Ephemeral Workspace Orchestrator",
+				repo: orders[orderIndex].repoUrl,
+				message: `Repository ${orders[orderIndex].repoUrl} linked to order ${id} in isolated sandbox`,
+				duration: "1.2s",
+			});
+
+			return json({ success: true, order: orders[orderIndex] });
+		}
+
+		// Start AI fixing pipeline: POST /api/orders/:id/start-fixing
+		if (path.match(/^\/api\/orders\/[^/]+\/start-fixing$/) && method === "POST") {
+			const id = path.split("/")[3];
+			const orderIndex = orders.findIndex((o) => o.id === id);
+			if (orderIndex === -1) return json({ error: "Order not found" }, 404);
+
+			const order = orders[orderIndex];
+
+			// Ingest as active Job into jobs queue
+			const linkedJob: Job = {
+				id: `JOB-${Math.floor(1000 + Math.random() * 9000)}`,
+				orderId: order.id,
+				repo: order.repoUrl,
+				branch: order.branchName,
+				title: order.bugDescription,
+				agent: "AutoFix Engineer",
+				status: "fixing",
+				statusLabel: "Fixing",
+				time: "Just now",
+				progress: 25,
+				logs: [
+					`Pipeline triggered for Order ${order.id}`,
+					`Cloning ${order.repoUrl} in ephemeral workspace...`,
+					`Analyzer Agent inspecting AST tree...`,
+				],
+			};
+			jobs = [linkedJob, ...jobs];
+
+			orders[orderIndex] = {
+				...order,
+				status: "ai_fixing",
+				aiStage: "Developer",
+			};
+
+			logs.unshift({
+				id: `LOG-${Math.floor(1000 + Math.random() * 9000)}`,
+				timestamp: new Date().toLocaleTimeString("id-ID"),
+				level: "info",
+				agent: "AutoFix Engineer",
+				repo: order.repoUrl,
+				message: `AI fixing pipeline initiated for ${order.id}: ${order.bugDescription}`,
+				duration: "0.8s",
+			});
+
+			return json({ success: true, order: orders[orderIndex], job: linkedJob });
+		}
+
+		// Close order & purge workspace: POST /api/orders/:id/close
+		if (path.match(/^\/api\/orders\/[^/]+\/close$/) && method === "POST") {
+			const id = path.split("/")[3];
+			const orderIndex = orders.findIndex((o) => o.id === id);
+			if (orderIndex === -1) return json({ error: "Order not found" }, 404);
+
+			orders[orderIndex] = {
+				...orders[orderIndex],
+				status: "job_closed",
+				retentionExpires: "Akses Dicabut & Workspace Dihapus",
+				workspaceDestroyed: true,
+			};
+
+			logs.unshift({
+				id: `LOG-${Math.floor(1000 + Math.random() * 9000)}`,
+				timestamp: new Date().toLocaleTimeString("id-ID"),
+				level: "success",
+				agent: "Security Guard",
+				repo: orders[orderIndex].repoUrl,
+				message: `Order ${id} closed: Zero-retention purge completed. Token revoked.`,
+				duration: "0.5s",
+			});
+
+			return json({ success: true, order: orders[orderIndex] });
+		}
+
+		// Standard Single Order CRUD: /api/orders/:id
 		if (path.startsWith("/api/orders/")) {
 			const id = path.replace("/api/orders/", "");
 			const orderIndex = orders.findIndex((o) => o.id === id);
@@ -187,7 +405,7 @@ export default {
 			}
 		}
 
-		// 5. Agents API (/api/agents)
+		// 5. AI Agents API (/api/agents)
 		if (path === "/api/agents") {
 			if (method === "GET") {
 				return json(agents);
@@ -211,8 +429,60 @@ export default {
 					avatar: initials || "AI",
 				};
 				agents = [...agents, newAgent];
+
+				logs.unshift({
+					id: `LOG-${Math.floor(1000 + Math.random() * 9000)}`,
+					timestamp: new Date().toLocaleTimeString("id-ID"),
+					level: "success",
+					agent: newAgent.name,
+					repo: "Cluster Core",
+					message: `Agent "${newAgent.name}" deployed to cluster as ${newAgent.role}`,
+					duration: "0.2s",
+				});
+
 				return json({ success: true, agent: newAgent }, 201);
 			}
+		}
+
+		// Dispatch Instant Job to specific Agent: POST /api/agents/:name/dispatch
+		if (path.match(/^\/api\/agents\/[^/]+\/dispatch$/) && method === "POST") {
+			const agentNameRaw = decodeURIComponent(path.split("/")[3]);
+			const agent = agents.find((a) => a.name.toLowerCase() === agentNameRaw.toLowerCase());
+
+			if (!agent) {
+				return json({ error: "Agent not found" }, 404);
+			}
+
+			const dispatchedJob: Job = {
+				id: `JOB-${Math.floor(4100 + Math.random() * 900)}`,
+				repo: "comneta-50/site-ai-company",
+				branch: "ai-auto-patch",
+				title: `Instant Diagnostic by ${agent.name}`,
+				agent: agent.name,
+				status: "fixing",
+				statusLabel: "Fixing",
+				time: "Just now",
+				progress: 10,
+				logs: [
+					`Instant task received by ${agent.name}`,
+					`Ingesting repository code for telemetry audit...`,
+				],
+			};
+			jobs = [dispatchedJob, ...jobs];
+			agent.activeJobs += 1;
+			agent.status = "Busy";
+
+			logs.unshift({
+				id: `LOG-${Math.floor(1000 + Math.random() * 9000)}`,
+				timestamp: new Date().toLocaleTimeString("id-ID"),
+				level: "info",
+				agent: agent.name,
+				repo: dispatchedJob.repo,
+				message: `Dispatched instant task ${dispatchedJob.id} to ${agent.name}`,
+				duration: "0.1s",
+			});
+
+			return json({ success: true, agent, job: dispatchedJob });
 		}
 
 		// 6. Reviews API (/api/reviews)

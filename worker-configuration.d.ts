@@ -3,6 +3,7 @@
 // Runtime types generated with workerd@1.20261104.1 2026-11-04
 interface __BaseEnv_Env {
 	AI: Ai;
+	DATABASE_URL?: string;
 }
 declare namespace Cloudflare {
 	interface GlobalProps {
