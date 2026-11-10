@@ -414,20 +414,20 @@ export default {
 				}
 
 				// Increment activeJobs of assigned agent
-				const assignedAgent = agents.find((a) => a.name === newJob.agent);
+				const assignedAgent = agents.find((a) => a.name.toLowerCase() === newJob.agent.toLowerCase());
 				if (assignedAgent) {
-					assignedAgent.activeJobs += 1;
+					assignedAgent.activeJobs = (assignedAgent.activeJobs || 0) + 1;
 					assignedAgent.status = "Busy";
-					if (sql) {
-						try {
-							await sql`
-								UPDATE agents 
-								SET active_jobs = active_jobs + 1, status = 'Busy' 
-								WHERE LOWER(name) = LOWER(${newJob.agent});
-							`;
-						} catch (err: any) {
-							console.error("Neon UPDATE agent active_jobs error:", err);
-						}
+				}
+				if (sql) {
+					try {
+						await sql`
+							UPDATE agents 
+							SET active_jobs = COALESCE(active_jobs, 0) + 1, status = 'Busy' 
+							WHERE LOWER(name) = LOWER(${newJob.agent});
+						`;
+					} catch (err: any) {
+						console.error("Neon UPDATE agent active_jobs error:", err);
 					}
 				}
 
