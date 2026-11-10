@@ -72,4 +72,34 @@ export async function initDbSchema(sql: NeonQueryFunction<false, false>) {
 			created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 		);
 	`;
+
+	await sql`
+		CREATE TABLE IF NOT EXISTS reviews (
+			id VARCHAR(64) PRIMARY KEY,
+			title TEXT NOT NULL,
+			repo VARCHAR(255) NOT NULL,
+			branch VARCHAR(255) NOT NULL,
+			author VARCHAR(255) NOT NULL,
+			risk VARCHAR(64) NOT NULL,
+			files_changed INT DEFAULT 1,
+			additions INT DEFAULT 0,
+			deletions INT DEFAULT 0,
+			summary TEXT NOT NULL,
+			time_label VARCHAR(64) NOT NULL,
+			created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+		);
+	`;
+
+	await sql`
+		CREATE TABLE IF NOT EXISTS repos (
+			name VARCHAR(255) PRIMARY KEY,
+			description TEXT NOT NULL,
+			stars INT DEFAULT 0,
+			default_branch VARCHAR(64) DEFAULT 'main',
+			synced_at VARCHAR(64) NOT NULL,
+			status VARCHAR(64) NOT NULL,
+			auto_fix BOOLEAN DEFAULT TRUE,
+			created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+		);
+	`;
 }

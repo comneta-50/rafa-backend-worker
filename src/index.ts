@@ -320,8 +320,55 @@ export default {
 
 		// 3. Jobs API (/api/jobs)
 		if (path === "/api/jobs") {
+			const sql = getDb(env);
+
 			if (method === "GET") {
 				const status = url.searchParams.get("status");
+				if (sql) {
+					try {
+						let dbJobs = [];
+						if (status && status !== "all") {
+							dbJobs = await sql`
+								SELECT 
+									id, 
+									order_id as "orderId", 
+									repo, 
+									branch, 
+									title, 
+									agent, 
+									status, 
+									status_label as "statusLabel", 
+									time_label as "time", 
+									progress, 
+									logs 
+								FROM jobs 
+								WHERE status = ${status} 
+								ORDER BY created_at DESC;
+							`;
+						} else {
+							dbJobs = await sql`
+								SELECT 
+									id, 
+									order_id as "orderId", 
+									repo, 
+									branch, 
+									title, 
+									agent, 
+									status, 
+									status_label as "statusLabel", 
+									time_label as "time", 
+									progress, 
+									logs 
+								FROM jobs 
+								ORDER BY created_at DESC;
+							`;
+						}
+						if (dbJobs && dbJobs.length > 0) return json(dbJobs);
+					} catch (err: any) {
+						console.error("Neon GET jobs error:", err);
+					}
+				}
+
 				if (status && status !== "all") {
 					return json(jobs.filter((j) => j.status === status));
 				}
@@ -350,11 +397,38 @@ export default {
 				};
 				jobs = [newJob, ...jobs];
 
+				if (sql) {
+					try {
+						await sql`
+							INSERT INTO jobs (
+								id, order_id, repo, branch, title, agent, status, status_label, time_label, progress, logs
+							) VALUES (
+								${newJob.id}, ${newJob.orderId || null}, ${newJob.repo}, ${newJob.branch}, ${newJob.title},
+								${newJob.agent}, ${newJob.status}, ${newJob.statusLabel}, ${newJob.time}, ${Number(newJob.progress) || 0},
+								${JSON.stringify(newJob.logs || [])}::jsonb
+							);
+						`;
+					} catch (err: any) {
+						console.error("Neon INSERT job error:", err);
+					}
+				}
+
 				// Increment activeJobs of assigned agent
 				const assignedAgent = agents.find((a) => a.name === newJob.agent);
 				if (assignedAgent) {
 					assignedAgent.activeJobs += 1;
 					assignedAgent.status = "Busy";
+					if (sql) {
+						try {
+							await sql`
+								UPDATE agents 
+								SET active_jobs = active_jobs + 1, status = 'Busy' 
+								WHERE LOWER(name) = LOWER(${newJob.agent});
+							`;
+						} catch (err: any) {
+							console.error("Neon UPDATE agent active_jobs error:", err);
+						}
+					}
 				}
 
 				// Record activity log
@@ -375,55 +449,119 @@ export default {
 		// Specialized Job Action: Retry / Re-trigger job
 		if (path.match(/^\/api\/jobs\/[^/]+\/retry$/) && method === "POST") {
 			const id = path.split("/")[3];
+			const sql = getDb(env);
 			const jobIndex = jobs.findIndex((j) => j.id === id);
-			if (jobIndex === -1) return json({ error: "Job not found" }, 404);
 
-			jobs[jobIndex] = {
-				...jobs[jobIndex],
-				status: "fixing",
-				statusLabel: "Fixing",
-				progress: 15,
-				logs: [
-					...(jobs[jobIndex].logs || []),
-					`Job re-triggered at ${new Date().toLocaleTimeString("id-ID")}`,
-					"Re-running unit test suites and analyzer AST pass...",
-				],
-			};
+			let updatedJob: Job | null = null;
+			if (jobIndex !== -1) {
+				jobs[jobIndex] = {
+					...jobs[jobIndex],
+					status: "fixing",
+					statusLabel: "Fixing",
+					progress: 15,
+					logs: [
+						...(jobs[jobIndex].logs || []),
+						`Job re-triggered at ${new Date().toLocaleTimeString("id-ID")}`,
+						"Re-running unit test suites and analyzer AST pass...",
+					],
+				};
+				updatedJob = jobs[jobIndex];
+			}
+
+			if (sql) {
+				try {
+					await sql`
+						UPDATE jobs 
+						SET status = 'fixing', status_label = 'Fixing', progress = 15 
+						WHERE id = ${id};
+					`;
+					if (!updatedJob) {
+						const res = await sql`
+							SELECT 
+								id, order_id as "orderId", repo, branch, title, agent, 
+								status, status_label as "statusLabel", time_label as "time", 
+								progress, logs 
+							FROM jobs WHERE id = ${id};
+						`;
+						if (res.length > 0) updatedJob = res[0] as any;
+					}
+				} catch (err: any) {
+					console.error("Neon UPDATE retry job error:", err);
+				}
+			}
+
+			if (!updatedJob) return json({ error: "Job not found" }, 404);
 
 			logs.unshift({
 				id: `LOG-${Math.floor(1000 + Math.random() * 9000)}`,
 				timestamp: new Date().toLocaleTimeString("id-ID"),
 				level: "info",
-				agent: jobs[jobIndex].agent,
-				repo: jobs[jobIndex].repo,
+				agent: updatedJob.agent,
+				repo: updatedJob.repo,
 				message: `Job ${id} re-triggered and returned to execution queue`,
 				duration: "0.2s",
 			});
 
-			return json({ success: true, job: jobs[jobIndex] });
+			return json({ success: true, job: updatedJob });
 		}
 
 		// Single Job Actions (/api/jobs/:id)
 		if (path.startsWith("/api/jobs/")) {
 			const id = path.replace("/api/jobs/", "");
+			const sql = getDb(env);
 			const jobIndex = jobs.findIndex((j) => j.id === id);
 
-			if (jobIndex === -1) {
-				return json({ error: "Job not found" }, 404);
-			}
-
 			if (method === "GET") {
+				if (sql) {
+					try {
+						const res = await sql`
+							SELECT 
+								id, order_id as "orderId", repo, branch, title, agent, 
+								status, status_label as "statusLabel", time_label as "time", 
+								progress, logs 
+							FROM jobs WHERE id = ${id};
+						`;
+						if (res.length > 0) return json(res[0]);
+					} catch (err: any) {
+						console.error("Neon GET single job error:", err);
+					}
+				}
+				if (jobIndex === -1) return json({ error: "Job not found" }, 404);
 				return json(jobs[jobIndex]);
 			}
 
 			if (method === "PATCH") {
 				const body: any = await request.json().catch(() => ({}));
-				jobs[jobIndex] = { ...jobs[jobIndex], ...body };
-				return json({ success: true, job: jobs[jobIndex] });
+				if (jobIndex !== -1) {
+					jobs[jobIndex] = { ...jobs[jobIndex], ...body };
+				}
+				if (sql) {
+					try {
+						if (body.status) {
+							await sql`
+								UPDATE jobs 
+								SET status = ${body.status}, 
+								    status_label = ${body.statusLabel || body.status},
+								    progress = ${body.progress !== undefined ? body.progress : 100}
+								WHERE id = ${id};
+							`;
+						}
+					} catch (err: any) {
+						console.error("Neon PATCH job error:", err);
+					}
+				}
+				return json({ success: true, job: jobIndex !== -1 ? jobs[jobIndex] : body });
 			}
 
 			if (method === "DELETE") {
 				jobs = jobs.filter((j) => j.id !== id);
+				if (sql) {
+					try {
+						await sql`DELETE FROM jobs WHERE id = ${id};`;
+					} catch (err: any) {
+						console.error("Neon DELETE job error:", err);
+					}
+				}
 				return json({ success: true, message: `Job ${id} deleted` });
 			}
 		}
@@ -731,7 +869,29 @@ export default {
 
 		// 5. AI Agents API (/api/agents)
 		if (path === "/api/agents") {
+			const sql = getDb(env);
+
 			if (method === "GET") {
+				if (sql) {
+					try {
+						const dbAgents = await sql`
+							SELECT 
+								name, 
+								role, 
+								status, 
+								active_jobs as "activeJobs", 
+								efficiency, 
+								avatar 
+							FROM agents 
+							ORDER BY created_at DESC;
+						`;
+						if (dbAgents && dbAgents.length > 0) {
+							return json(dbAgents);
+						}
+					} catch (err: any) {
+						console.error("Neon GET agents error:", err);
+					}
+				}
 				return json(agents);
 			}
 
@@ -754,6 +914,19 @@ export default {
 				};
 				agents = [...agents, newAgent];
 
+				if (sql) {
+					try {
+						await sql`
+							INSERT INTO agents (name, role, status, active_jobs, efficiency, avatar)
+							VALUES (${newAgent.name}, ${newAgent.role}, ${newAgent.status}, ${newAgent.activeJobs}, ${newAgent.efficiency}, ${newAgent.avatar})
+							ON CONFLICT (name) DO UPDATE 
+							SET role = EXCLUDED.role, status = EXCLUDED.status;
+						`;
+					} catch (err: any) {
+						console.error("Neon INSERT agent error:", err);
+					}
+				}
+
 				logs.unshift({
 					id: `LOG-${Math.floor(1000 + Math.random() * 9000)}`,
 					timestamp: new Date().toLocaleTimeString("id-ID"),
@@ -765,6 +938,61 @@ export default {
 				});
 
 				return json({ success: true, agent: newAgent }, 201);
+			}
+		}
+
+		// Single Agent Operations (/api/agents/:name)
+		if (path.startsWith("/api/agents/") && !path.endsWith("/dispatch")) {
+			const agentName = decodeURIComponent(path.replace("/api/agents/", ""));
+			const sql = getDb(env);
+			const agentIndex = agents.findIndex((a) => a.name.toLowerCase() === agentName.toLowerCase());
+
+			if (method === "GET") {
+				if (sql) {
+					try {
+						const res = await sql`
+							SELECT name, role, status, active_jobs as "activeJobs", efficiency, avatar 
+							FROM agents WHERE LOWER(name) = LOWER(${agentName});
+						`;
+						if (res.length > 0) return json(res[0]);
+					} catch (err: any) {
+						console.error("Neon GET single agent error:", err);
+					}
+				}
+				if (agentIndex === -1) return json({ error: "Agent not found" }, 404);
+				return json(agents[agentIndex]);
+			}
+
+			if (method === "PATCH") {
+				const body: any = await request.json().catch(() => ({}));
+				if (agentIndex !== -1) {
+					agents[agentIndex] = { ...agents[agentIndex], ...body };
+				}
+				if (sql) {
+					try {
+						if (body.status) {
+							await sql`UPDATE agents SET status = ${body.status} WHERE LOWER(name) = LOWER(${agentName});`;
+						}
+						if (body.role) {
+							await sql`UPDATE agents SET role = ${body.role} WHERE LOWER(name) = LOWER(${agentName});`;
+						}
+					} catch (err: any) {
+						console.error("Neon PATCH agent error:", err);
+					}
+				}
+				return json({ success: true, message: `Agent ${agentName} updated` });
+			}
+
+			if (method === "DELETE") {
+				agents = agents.filter((a) => a.name.toLowerCase() !== agentName.toLowerCase());
+				if (sql) {
+					try {
+						await sql`DELETE FROM agents WHERE LOWER(name) = LOWER(${agentName});`;
+					} catch (err: any) {
+						console.error("Neon DELETE agent error:", err);
+					}
+				}
+				return json({ success: true, message: `Agent ${agentName} deleted` });
 			}
 		}
 
@@ -811,7 +1039,32 @@ export default {
 
 		// 6. Reviews API (/api/reviews)
 		if (path === "/api/reviews") {
+			const sql = getDb(env);
+
 			if (method === "GET") {
+				if (sql) {
+					try {
+						const dbReviews = await sql`
+							SELECT 
+								id, 
+								title, 
+								repo, 
+								branch, 
+								author, 
+								risk, 
+								files_changed as "filesChanged", 
+								additions, 
+								deletions, 
+								summary, 
+								time_label as "time" 
+							FROM reviews 
+							ORDER BY created_at DESC;
+						`;
+						if (dbReviews && dbReviews.length > 0) return json(dbReviews);
+					} catch (err: any) {
+						console.error("Neon GET reviews error:", err);
+					}
+				}
 				return json(reviews);
 			}
 
@@ -824,28 +1077,75 @@ export default {
 					branch: body.branch || "feat/patch",
 					author: body.author || "AutoFix Engineer",
 					risk: body.risk || "Medium Impact",
-					filesChanged: body.filesChanged || 1,
-					additions: body.additions || 10,
-					deletions: body.deletions || 2,
+					filesChanged: Number(body.filesChanged) || 1,
+					additions: Number(body.additions) || 10,
+					deletions: Number(body.deletions) || 2,
 					summary: body.summary || "Automated code revision",
 					time: "Just now",
 				};
 				reviews = [newReview, ...reviews];
+
+				if (sql) {
+					try {
+						await sql`
+							INSERT INTO reviews (
+								id, title, repo, branch, author, risk, files_changed, additions, deletions, summary, time_label
+							) VALUES (
+								${newReview.id}, ${newReview.title}, ${newReview.repo}, ${newReview.branch}, ${newReview.author},
+								${newReview.risk}, ${newReview.filesChanged}, ${newReview.additions}, ${newReview.deletions},
+								${newReview.summary}, ${newReview.time}
+							);
+						`;
+					} catch (err: any) {
+						console.error("Neon INSERT review error:", err);
+					}
+				}
+
 				return json({ success: true, review: newReview }, 201);
 			}
 		}
 
 		if (path.startsWith("/api/reviews/")) {
 			const id = path.replace("/api/reviews/", "");
+			const sql = getDb(env);
+
 			if (method === "DELETE") {
 				reviews = reviews.filter((r) => r.id !== id);
+				if (sql) {
+					try {
+						await sql`DELETE FROM reviews WHERE id = ${id};`;
+					} catch (err: any) {
+						console.error("Neon DELETE review error:", err);
+					}
+				}
 				return json({ success: true, message: `Review ${id} processed` });
 			}
 		}
 
 		// 7. Repositories API (/api/repos)
 		if (path === "/api/repos") {
+			const sql = getDb(env);
+
 			if (method === "GET") {
+				if (sql) {
+					try {
+						const dbRepos = await sql`
+							SELECT 
+								name, 
+								description, 
+								stars, 
+								default_branch as "defaultBranch", 
+								synced_at as "syncedAt", 
+								status, 
+								auto_fix as "autoFix" 
+							FROM repos 
+							ORDER BY created_at DESC;
+						`;
+						if (dbRepos && dbRepos.length > 0) return json(dbRepos);
+					} catch (err: any) {
+						console.error("Neon GET repos error:", err);
+					}
+				}
 				return json(repos);
 			}
 
@@ -861,7 +1161,38 @@ export default {
 					autoFix: body.autoFix ?? true,
 				};
 				repos = [...repos, newRepo];
+
+				if (sql) {
+					try {
+						await sql`
+							INSERT INTO repos (name, description, stars, default_branch, synced_at, status, auto_fix)
+							VALUES (${newRepo.name}, ${newRepo.description}, ${newRepo.stars}, ${newRepo.defaultBranch}, ${newRepo.syncedAt}, ${newRepo.status}, ${newRepo.autoFix})
+							ON CONFLICT (name) DO UPDATE 
+							SET description = EXCLUDED.description, auto_fix = EXCLUDED.auto_fix;
+						`;
+					} catch (err: any) {
+						console.error("Neon INSERT repo error:", err);
+					}
+				}
+
 				return json({ success: true, repo: newRepo }, 201);
+			}
+		}
+
+		if (path.startsWith("/api/repos/")) {
+			const repoName = decodeURIComponent(path.replace("/api/repos/", ""));
+			const sql = getDb(env);
+
+			if (method === "DELETE") {
+				repos = repos.filter((r) => r.name.toLowerCase() !== repoName.toLowerCase());
+				if (sql) {
+					try {
+						await sql`DELETE FROM repos WHERE LOWER(name) = LOWER(${repoName});`;
+					} catch (err: any) {
+						console.error("Neon DELETE repo error:", err);
+					}
+				}
+				return json({ success: true, message: `Repo ${repoName} removed` });
 			}
 		}
 
