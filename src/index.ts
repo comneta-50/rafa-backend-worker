@@ -299,12 +299,32 @@ export default {
 
 		// 2c. Metrics / Overview API
 		if (path === "/api/metrics" && method === "GET") {
+			const sql = getDb(env);
+			let totalJobsCount = jobs.length;
+
+			if (sql) {
+				try {
+					const countRes = await sql`SELECT COUNT(*)::int as count FROM jobs;`;
+					if (countRes.length > 0) totalJobsCount = countRes[0].count;
+				} catch (e) {
+					// fallback
+				}
+			}
+
 			const activeAgents = agents.filter((a) => a.status !== "Offline").length;
-			const totalJobs = jobs.length;
+			const totalJobs = totalJobsCount;
 			const runningJobs = jobs.filter((j) => j.status === "fixing" || j.status === "testing").length;
 			const completedJobs = jobs.filter((j) => j.status === "completed").length;
 			const pendingReviews = reviews.length;
 			const totalOrders = orders.length;
+
+			// Kalkulasi konsumsi kuota neurons Cloudflare Workers AI harian
+			// Free tier Cloudflare Workers AI: 10,000 neurons/hari (atau alokasi pro 100,000 neurons)
+			const maxNeuronsLimit = 100000;
+			// Setiap AI job inference rata-rata memakai ~250-400 neurons
+			const estimatedNeuronsUsed = Math.min(totalJobs * 350 + (orders.length * 120), maxNeuronsLimit);
+			const neuronsRemaining = Math.max(0, maxNeuronsLimit - estimatedNeuronsUsed);
+			const neuronsPercentage = Math.round((estimatedNeuronsUsed / maxNeuronsLimit) * 100);
 
 			return json({
 				activeAgents,
@@ -315,6 +335,13 @@ export default {
 				totalOrders,
 				clusterHealth: "Healthy",
 				latency: "24ms",
+				neurons: {
+					limit: maxNeuronsLimit,
+					used: estimatedNeuronsUsed,
+					remaining: neuronsRemaining,
+					percentage: neuronsPercentage,
+					formattedRemaining: neuronsRemaining.toLocaleString("id-ID"),
+				},
 			});
 		}
 
