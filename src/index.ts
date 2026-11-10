@@ -1088,10 +1088,30 @@ export default {
 		// Dispatch Instant Job to specific Agent: POST /api/agents/:name/dispatch
 		if (path.match(/^\/api\/agents\/[^/]+\/dispatch$/) && method === "POST") {
 			const agentNameRaw = decodeURIComponent(path.split("/")[3]);
-			const agent = agents.find((a) => a.name.toLowerCase() === agentNameRaw.toLowerCase());
+			const sql = getDb(env);
+
+			let agent: Agent | null = null;
+			const localIdx = agents.findIndex((a) => a.name.toLowerCase() === agentNameRaw.toLowerCase());
+			if (localIdx !== -1) {
+				agent = agents[localIdx];
+			}
+
+			if (sql) {
+				try {
+					const res = await sql`
+						SELECT name, role, status, active_jobs as "activeJobs", efficiency, avatar 
+						FROM agents WHERE LOWER(name) = LOWER(${agentNameRaw});
+					`;
+					if (res.length > 0) {
+						agent = res[0] as any;
+					}
+				} catch (err: any) {
+					console.error("Neon dispatch agent query error:", err);
+				}
+			}
 
 			if (!agent) {
-				return json({ error: "Agent not found" }, 404);
+				return json({ error: `Agent "${agentNameRaw}" not found in cluster` }, 404);
 			}
 
 			const dispatchedJob: Job = {
@@ -1103,15 +1123,56 @@ export default {
 				status: "fixing",
 				statusLabel: "Fixing",
 				time: "Just now",
-				progress: 10,
+				progress: 25,
 				logs: [
 					`Instant task received by ${agent.name}`,
 					`Ingesting repository code for telemetry audit...`,
+					`Workers AI AST inspection running...`,
 				],
 			};
+
+			// Run Workers AI
+			if (env.AI) {
+				try {
+					const aiPrompt = `Kamu adalah ${agent.name} (${agent.role}). Berikan ringkasan diagnostic code audit untuk repository site-ai-company dalam 2 kalimat.`;
+					const aiResp: any = await env.AI.run("@cf/meta/llama-3.2-3b-instruct", {
+						prompt: aiPrompt,
+						max_tokens: 256,
+					}).catch(() => null);
+
+					const aiSummary = aiResp?.response || aiResp?.choices?.[0]?.text;
+					if (aiSummary) {
+						dispatchedJob.logs.push(`AI Diagnostic (${agent.name}): ${aiSummary.trim().replace(/\n+/g, " ").slice(0, 200)}...`);
+						dispatchedJob.progress = 60;
+					}
+				} catch (e) {
+					// fallback
+				}
+			}
+
 			jobs = [dispatchedJob, ...jobs];
-			agent.activeJobs += 1;
+			agent.activeJobs = (agent.activeJobs || 0) + 1;
 			agent.status = "Busy";
+
+			if (sql) {
+				try {
+					await sql`
+						INSERT INTO jobs (
+							id, repo, branch, title, agent, status, status_label, time_label, progress, logs
+						) VALUES (
+							${dispatchedJob.id}, ${dispatchedJob.repo}, ${dispatchedJob.branch}, ${dispatchedJob.title},
+							${dispatchedJob.agent}, ${dispatchedJob.status}, ${dispatchedJob.statusLabel}, ${dispatchedJob.time},
+							${dispatchedJob.progress}, ${JSON.stringify(dispatchedJob.logs)}::jsonb
+						);
+
+						UPDATE agents 
+						SET active_jobs = COALESCE(active_jobs, 0) + 1, status = 'Busy' 
+						WHERE LOWER(name) = LOWER(${agent.name});
+					`;
+				} catch (err: any) {
+					console.error("Neon dispatch insert job error:", err);
+				}
+			}
 
 			logs.unshift({
 				id: `LOG-${Math.floor(1000 + Math.random() * 9000)}`,
