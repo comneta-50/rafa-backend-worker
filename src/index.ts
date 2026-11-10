@@ -22,6 +22,20 @@ let reviews = [...initialReviews];
 let repos = [...initialRepos];
 let logs = [...initialActivityLogs];
 
+// Active WebSocket client connections for real-time telemetry streaming
+const wsClients = new Set<WebSocket>();
+
+function broadcast(data: any) {
+	const message = JSON.stringify(data);
+	for (const ws of wsClients) {
+		try {
+			ws.send(message);
+		} catch (err) {
+			wsClients.delete(ws);
+		}
+	}
+}
+
 const corsHeaders = {
 	"Access-Control-Allow-Origin": "*",
 	"Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
@@ -44,6 +58,42 @@ export default {
 		const url = new URL(request.url);
 		const path = url.pathname;
 		const method = request.method;
+
+		// 0. Real-time WebSocket Stream Endpoint (/ws or /api/ws)
+		if (path === "/ws" || path === "/api/ws") {
+			const upgradeHeader = request.headers.get("Upgrade");
+			if (!upgradeHeader || upgradeHeader.toLowerCase() !== "websocket") {
+				return new Response("Expected WebSocket upgrade", { status: 426 });
+			}
+
+			const webSocketPair = new WebSocketPair();
+			const [client, server] = Object.values(webSocketPair);
+
+			server.accept();
+			wsClients.add(server);
+
+			server.addEventListener("close", () => {
+				wsClients.delete(server);
+			});
+
+			server.addEventListener("error", () => {
+				wsClients.delete(server);
+			});
+
+			// Kirim initial connection handshake & status
+			server.send(
+				JSON.stringify({
+					type: "CONNECTED",
+					message: "Connected to Rafa Company Realtime WebSocket Hub",
+					timestamp: new Date().toISOString(),
+				})
+			);
+
+			return new Response(null, {
+				status: 101,
+				webSocket: client,
+			});
+		}
 
 		// 1. Root & Health Check
 		if (path === "/" || path === "/health") {
@@ -324,7 +374,8 @@ export default {
 				try {
 					const settingRes = await sql`SELECT value FROM settings WHERE key = 'workspace';`;
 					if (settingRes.length > 0 && settingRes[0].value?.neuronsBudget) {
-						const parsed = parseInt(String(settingRes[0].value.neuronsBudget).replace(/[^0-9]/g, ""), 10);
+						const rawVal = String(settingRes[0].value.neuronsBudget).replace(/[^0-9]/g, "");
+						const parsed = parseInt(rawVal, 10);
 						if (!isNaN(parsed) && parsed > 0) {
 							maxNeuronsLimit = parsed;
 						}
@@ -334,26 +385,46 @@ export default {
 				}
 			}
 
-			// Setiap AI job inference rata-rata memakai ~250-400 neurons
-			const estimatedNeuronsUsed = Math.min(totalJobs * 350 + (orders.length * 120), maxNeuronsLimit);
+			// Ambil data aktivitas nyata penggunaan AI dari tabel jobs
+			// Setiap job mengeksekusi inferensi Llama/GLM yang mengonsumsi ~300 neurons
+			let actualJobsCount = totalJobs;
+			let actualOrdersCount = orders.length;
+
+			if (sql) {
+				try {
+					const jobCountRes = await sql`SELECT COUNT(*)::int as count FROM jobs;`;
+					if (jobCountRes.length > 0) actualJobsCount = jobCountRes[0].count;
+
+					const orderCountRes = await sql`SELECT COUNT(*)::int as count FROM orders;`;
+					if (orderCountRes.length > 0) actualOrdersCount = orderCountRes[0].count;
+				} catch (e) {
+					// fallback
+				}
+			}
+
+			// Estimasi penggunaan neurons terhitung dari aktivitas pipeline
+			// Jika belum ada job/order, used = 0
+			const estimatedNeuronsUsed = Math.min((actualJobsCount * 350) + (actualOrdersCount * 120), maxNeuronsLimit);
 			const neuronsRemaining = Math.max(0, maxNeuronsLimit - estimatedNeuronsUsed);
-			const neuronsPercentage = Math.round((estimatedNeuronsUsed / maxNeuronsLimit) * 100);
+			const neuronsPercentage = maxNeuronsLimit > 0 ? Math.round((estimatedNeuronsUsed / maxNeuronsLimit) * 100) : 0;
 
 			return json({
 				activeAgents,
-				totalJobs,
+				totalJobs: actualJobsCount,
 				runningJobs,
 				completedJobs,
 				pendingReviews,
-				totalOrders,
+				totalOrders: actualOrdersCount,
 				clusterHealth: "Healthy",
 				latency: "24ms",
 				neurons: {
 					limit: maxNeuronsLimit,
+					formattedLimit: maxNeuronsLimit.toLocaleString("id-ID"),
 					used: estimatedNeuronsUsed,
+					formattedUsed: estimatedNeuronsUsed.toLocaleString("id-ID"),
 					remaining: neuronsRemaining,
-					percentage: neuronsPercentage,
 					formattedRemaining: neuronsRemaining.toLocaleString("id-ID"),
+					percentage: neuronsPercentage,
 				},
 			});
 		}
@@ -502,6 +573,14 @@ export default {
 					duration: "0.1s",
 				});
 
+				// Broadcast real-time event to all connected clients
+				broadcast({
+					type: "JOB_CREATED",
+					job: newJob,
+					agent: assignedAgent,
+					timestamp: new Date().toISOString(),
+				});
+
 				return json({ success: true, job: newJob }, 201);
 			}
 		}
@@ -622,6 +701,13 @@ export default {
 						console.error("Neon DELETE job error:", err);
 					}
 				}
+
+				broadcast({
+					type: "JOB_DELETED",
+					jobId: id,
+					timestamp: new Date().toISOString(),
+				});
+
 				return json({ success: true, message: `Job ${id} deleted` });
 			}
 		}
