@@ -113,7 +113,67 @@ export default {
 			});
 		}
 
-		// 2b. Metrics / Overview API
+		// 2b. Analytics Unified Endpoint (/api/analytics)
+		if (path === "/api/analytics" && method === "GET") {
+			const timeRange = url.searchParams.get("timeRange") || "7d";
+			const totalIncoming = jobs.length + orders.length;
+			const totalCompleted = jobs.filter((j) => j.status === "completed").length;
+			const totalFailed = jobs.filter((j) => j.status === "failed").length;
+			const totalQueued = jobs.filter((j) => j.status === "fixing" || j.status === "testing").length;
+
+			// Data tren line chart harian (Senin - Minggu)
+			const days = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"];
+			const incomingTrend = [0, 0, 0, 0, 0, 0, totalIncoming];
+			const completedTrend = [0, 0, 0, 0, 0, 0, totalCompleted];
+			const failedTrend = [0, 0, 0, 0, 0, 0, totalFailed];
+
+			// Distribusi kategori domain sistem
+			const categoryLabels = ["Auth & Sec", "Database", "SSR Frontend", "API Worker", "Billing", "CI Pipeline"];
+			const categoryCompleted = [
+				jobs.filter((j) => j.title.toLowerCase().includes("auth") || j.title.toLowerCase().includes("token")).length,
+				jobs.filter((j) => j.title.toLowerCase().includes("postgres") || j.title.toLowerCase().includes("pool")).length,
+				jobs.filter((j) => j.title.toLowerCase().includes("ssr") || j.title.toLowerCase().includes("hydration")).length,
+				jobs.filter((j) => j.title.toLowerCase().includes("worker") || j.title.toLowerCase().includes("redis")).length,
+				jobs.filter((j) => j.title.toLowerCase().includes("billing") || j.title.toLowerCase().includes("stripe")).length,
+				jobs.filter((j) => j.title.toLowerCase().includes("ci") || j.title.toLowerCase().includes("pipeline")).length,
+			];
+
+			return json({
+				summary: {
+					totalIncoming,
+					totalCompleted,
+					totalFailed,
+					completionRate: totalIncoming > 0 ? `${Math.round((totalCompleted / totalIncoming) * 100)}%` : "100%",
+					failureRate: totalIncoming > 0 ? `${Math.round((totalFailed / totalIncoming) * 100)}%` : "0%",
+					timeRange,
+				},
+				lineChart: {
+					labels: days,
+					incoming: incomingTrend,
+					completed: completedTrend,
+					failed: failedTrend,
+				},
+				barChart: {
+					labels: categoryLabels,
+					completed: categoryCompleted,
+					failed: [0, 0, 0, 0, 0, 0],
+				},
+				doughnut: {
+					labels: ["Selesai", "Gagal", "Masuk (Queued)"],
+					data: [totalCompleted, totalFailed, totalQueued],
+				},
+				recentLogs: logs.slice(0, 6).map((l) => ({
+					id: l.id,
+					timestamp: l.timestamp,
+					agent: l.agent,
+					repo: l.repo,
+					action: l.message,
+					type: l.level === "success" ? "Completed" : l.level === "failed" ? "Failed" : "Queued",
+				})),
+			});
+		}
+
+		// 2c. Metrics / Overview API
 		if (path === "/api/metrics" && method === "GET") {
 			const activeAgents = agents.filter((a) => a.status !== "Offline").length;
 			const totalJobs = jobs.length;
