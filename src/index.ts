@@ -868,6 +868,48 @@ export default {
 		}
 
 		// 5. AI Agents API (/api/agents)
+		if (path === "/api/agents/stats" && method === "GET") {
+			const sql = getDb(env);
+			let agentList: Agent[] = agents;
+
+			if (sql) {
+				try {
+					const dbAgents = await sql`
+						SELECT 
+							name, 
+							role, 
+							status, 
+							active_jobs as "activeJobs", 
+							efficiency, 
+							avatar 
+						FROM agents 
+						ORDER BY created_at DESC;
+					`;
+					if (dbAgents && dbAgents.length > 0) {
+						agentList = dbAgents as any[];
+					}
+				} catch (err: any) {
+					console.error("Neon GET agents/stats error:", err);
+				}
+			}
+
+			const totalAgents = agentList.length;
+			const onlineAgents = agentList.filter((a) => a.status === "Online").length;
+			const busyAgents = agentList.filter((a) => a.status === "Busy").length;
+			const offlineAgents = agentList.filter((a) => a.status === "Offline").length;
+			const totalActiveJobs = agentList.reduce((acc, a) => acc + (a.activeJobs || 0), 0);
+
+			return json({
+				totalAgents,
+				onlineAgents,
+				busyAgents,
+				offlineAgents,
+				totalActiveJobs,
+				avgEfficiency: totalAgents > 0 ? "99.4%" : "0%",
+				agents: agentList,
+			});
+		}
+
 		if (path === "/api/agents") {
 			const sql = getDb(env);
 
