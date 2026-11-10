@@ -318,9 +318,22 @@ export default {
 			const pendingReviews = reviews.length;
 			const totalOrders = orders.length;
 
-			// Kalkulasi konsumsi kuota neurons Cloudflare Workers AI harian
-			// Free tier Cloudflare Workers AI: 10,000 neurons/hari (atau alokasi pro 100,000 neurons)
-			const maxNeuronsLimit = 100000;
+			// Ambil limit kuota neurons dari database settings jika diset pengguna
+			let maxNeuronsLimit = 100000;
+			if (sql) {
+				try {
+					const settingRes = await sql`SELECT value FROM settings WHERE key = 'workspace';`;
+					if (settingRes.length > 0 && settingRes[0].value?.neuronsBudget) {
+						const parsed = parseInt(String(settingRes[0].value.neuronsBudget).replace(/[^0-9]/g, ""), 10);
+						if (!isNaN(parsed) && parsed > 0) {
+							maxNeuronsLimit = parsed;
+						}
+					}
+				} catch (e) {
+					// fallback
+				}
+			}
+
 			// Setiap AI job inference rata-rata memakai ~250-400 neurons
 			const estimatedNeuronsUsed = Math.min(totalJobs * 350 + (orders.length * 120), maxNeuronsLimit);
 			const neuronsRemaining = Math.max(0, maxNeuronsLimit - estimatedNeuronsUsed);
