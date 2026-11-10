@@ -13,6 +13,18 @@ export function getDb(env: Env): NeonQueryFunction<false, false> | null {
  */
 export async function initDbSchema(sql: NeonQueryFunction<false, false>) {
 	await sql`
+		CREATE TABLE IF NOT EXISTS users (
+			id VARCHAR(64) PRIMARY KEY,
+			email VARCHAR(255) UNIQUE NOT NULL,
+			password_hash VARCHAR(255) NOT NULL,
+			name VARCHAR(255) NOT NULL,
+			role VARCHAR(64) DEFAULT 'developer',
+			avatar VARCHAR(16) DEFAULT 'US',
+			created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+		);
+	`;
+
+	await sql`
 		CREATE TABLE IF NOT EXISTS orders (
 			id VARCHAR(64) PRIMARY KEY,
 			client_name VARCHAR(255) NOT NULL,

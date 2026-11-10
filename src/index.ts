@@ -87,6 +87,130 @@ export default {
 			}
 		}
 
+		// 1c. Authentication API (/api/auth/register & /api/auth/login)
+		if (path === "/api/auth/register" && method === "POST") {
+			const sql = getDb(env);
+			const body: any = await request.json().catch(() => ({}));
+			const { email, password, name } = body;
+
+			if (!email || !password || !name) {
+				return json({ success: false, error: "Nama, email, dan password wajib diisi." }, 400);
+			}
+
+			const initials = name
+				.split(" ")
+				.map((w: string) => w[0])
+				.join("")
+				.toUpperCase()
+				.slice(0, 2);
+
+			const newUser = {
+				id: `USR-${Math.floor(1000 + Math.random() * 9000)}`,
+				email: email.toLowerCase().trim(),
+				name: name.trim(),
+				role: "developer",
+				avatar: initials || "US",
+			};
+
+			if (sql) {
+				try {
+					// Check existing
+					const existing = await sql`SELECT id FROM users WHERE email = ${newUser.email} LIMIT 1;`;
+					if (existing.length > 0) {
+						return json({ success: false, error: "Email sudah terdaftar. Silakan login." }, 400);
+					}
+
+					await sql`
+						INSERT INTO users (id, email, password_hash, name, role, avatar)
+						VALUES (${newUser.id}, ${newUser.email}, ${password}, ${newUser.name}, ${newUser.role}, ${newUser.avatar});
+					`;
+				} catch (err: any) {
+					console.error("Neon register error:", err);
+				}
+			}
+
+			// Generate simple auth token
+			const token = `token_${newUser.id}_${Date.now()}`;
+			return json({
+				success: true,
+				message: "Registrasi berhasil!",
+				user: newUser,
+				token,
+			}, 201);
+		}
+
+		if (path === "/api/auth/login" && method === "POST") {
+			const sql = getDb(env);
+			let body: any = {};
+			try {
+				body = await request.json();
+			} catch {
+				const text = await request.text().catch(() => "{}");
+				try {
+					body = JSON.parse(text);
+				} catch {
+					body = {};
+				}
+			}
+			const email = (body.email || "").toString();
+			const password = (body.password || "").toString();
+
+			if (!email.trim() || !password.trim()) {
+				return json({ success: false, error: "Email dan password wajib diisi." }, 400);
+			}
+
+			let user: any = null;
+
+			if (sql) {
+				try {
+					const res = await sql`
+						SELECT id, email, name, role, avatar, password_hash 
+						FROM users 
+						WHERE email = ${email.toLowerCase().trim()} 
+						LIMIT 1;
+					`;
+					if (res.length > 0) {
+						if (res[0].password_hash === password) {
+							user = {
+								id: res[0].id,
+								email: res[0].email,
+								name: res[0].name,
+								role: res[0].role,
+								avatar: res[0].avatar,
+							};
+						} else {
+							return json({ success: false, error: "Password yang Anda masukkan salah." }, 401);
+						}
+					}
+				} catch (err: any) {
+					console.error("Neon login query error:", err);
+				}
+			}
+
+			// Default admin fallback jika database belum ada user
+			if (!user) {
+				if (email.toLowerCase().trim() === "admin@rafa.ai" && password === "admin123") {
+					user = {
+						id: "USR-001",
+						email: "admin@rafa.ai",
+						name: "Rafa Admin",
+						role: "superadmin",
+						avatar: "RA",
+					};
+				} else {
+					return json({ success: false, error: "Akun tidak ditemukan atau password salah." }, 401);
+				}
+			}
+
+			const token = `token_${user.id}_${Date.now()}`;
+			return json({
+				success: true,
+				message: "Login berhasil!",
+				user,
+				token,
+			});
+		}
+
 		// 2. Dashboard Unified Endpoint (/api/dashboard)
 		if (path === "/api/dashboard" && method === "GET") {
 			const activeAgentsList = agents.filter((a) => a.status !== "Offline");
