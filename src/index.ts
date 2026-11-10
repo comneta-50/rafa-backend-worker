@@ -246,7 +246,35 @@ export default {
 
 		// 4. Client Orders API (/api/orders)
 		if (path === "/api/orders") {
+			const sql = getDb(env);
+
 			if (method === "GET") {
+				if (sql) {
+					try {
+						const dbOrders = await sql`
+							SELECT 
+								id, 
+								client_name as "clientName", 
+								client_email as "clientEmail", 
+								package_type as "packageType", 
+								fee_amount as "feeAmount", 
+								bug_description as "bugDescription", 
+								repo_url as "repoUrl", 
+								branch_name as "branchName", 
+								status, 
+								ai_stage as "aiStage", 
+								retention_expires as "retentionExpires", 
+								pr_url as "prUrl", 
+								zip_downloaded as "zipDownloaded", 
+								workspace_destroyed as "workspaceDestroyed"
+							FROM orders 
+							ORDER BY created_at DESC;
+						`;
+						return json(dbOrders);
+					} catch (err: any) {
+						console.error("Neon GET orders error:", err);
+					}
+				}
 				return json(orders);
 			}
 
@@ -267,6 +295,24 @@ export default {
 				};
 				orders = [newOrder, ...orders];
 
+				if (sql) {
+					try {
+						await sql`
+							INSERT INTO orders (
+								id, client_name, client_email, package_type, fee_amount,
+								bug_description, repo_url, branch_name, status, retention_expires,
+								workspace_destroyed
+							) VALUES (
+								${newOrder.id}, ${newOrder.clientName}, ${newOrder.clientEmail}, ${newOrder.packageType}, ${newOrder.feeAmount},
+								${newOrder.bugDescription}, ${newOrder.repoUrl}, ${newOrder.branchName}, ${newOrder.status}, ${newOrder.retentionExpires},
+								${newOrder.workspaceDestroyed}
+							);
+						`;
+					} catch (err: any) {
+						console.error("Neon INSERT order error:", err);
+					}
+				}
+
 				logs.unshift({
 					id: `LOG-${Math.floor(1000 + Math.random() * 9000)}`,
 					timestamp: new Date().toLocaleTimeString("id-ID"),
@@ -285,35 +331,68 @@ export default {
 		// Connect repo: POST /api/orders/:id/connect-repo
 		if (path.match(/^\/api\/orders\/[^/]+\/connect-repo$/) && method === "POST") {
 			const id = path.split("/")[3];
+			const sql = getDb(env);
 			const orderIndex = orders.findIndex((o) => o.id === id);
-			if (orderIndex === -1) return json({ error: "Order not found" }, 404);
 
-			orders[orderIndex] = {
-				...orders[orderIndex],
-				status: "repo_connected",
-				retentionExpires: "7 Hari (Ephemeral)",
-			};
+			let updatedOrder: LifecycleOrder | null = null;
+			if (orderIndex !== -1) {
+				orders[orderIndex] = {
+					...orders[orderIndex],
+					status: "repo_connected",
+					retentionExpires: "7 Hari (Ephemeral)",
+				};
+				updatedOrder = orders[orderIndex];
+			}
+
+			if (sql) {
+				try {
+					await sql`
+						UPDATE orders 
+						SET status = 'repo_connected', retention_expires = '7 Hari (Ephemeral)' 
+						WHERE id = ${id};
+					`;
+					if (!updatedOrder) {
+						const res = await sql`SELECT * FROM orders WHERE id = ${id};`;
+						if (res.length > 0) updatedOrder = res[0] as any;
+					}
+				} catch (err: any) {
+					console.error("Neon UPDATE connect-repo error:", err);
+				}
+			}
+
+			if (!updatedOrder) return json({ error: "Order not found" }, 404);
 
 			logs.unshift({
 				id: `LOG-${Math.floor(1000 + Math.random() * 9000)}`,
 				timestamp: new Date().toLocaleTimeString("id-ID"),
 				level: "info",
 				agent: "Ephemeral Workspace Orchestrator",
-				repo: orders[orderIndex].repoUrl,
-				message: `Repository ${orders[orderIndex].repoUrl} linked to order ${id} in isolated sandbox`,
+				repo: updatedOrder.repoUrl,
+				message: `Repository ${updatedOrder.repoUrl} linked to order ${id} in isolated sandbox`,
 				duration: "1.2s",
 			});
 
-			return json({ success: true, order: orders[orderIndex] });
+			return json({ success: true, order: updatedOrder });
 		}
 
 		// Start AI fixing pipeline: POST /api/orders/:id/start-fixing
 		if (path.match(/^\/api\/orders\/[^/]+\/start-fixing$/) && method === "POST") {
 			const id = path.split("/")[3];
+			const sql = getDb(env);
 			const orderIndex = orders.findIndex((o) => o.id === id);
-			if (orderIndex === -1) return json({ error: "Order not found" }, 404);
 
-			const order = orders[orderIndex];
+			let order: LifecycleOrder | null = orderIndex !== -1 ? orders[orderIndex] : null;
+
+			if (sql && !order) {
+				try {
+					const res = await sql`SELECT * FROM orders WHERE id = ${id};`;
+					if (res.length > 0) order = res[0] as any;
+				} catch (err) {
+					console.error(err);
+				}
+			}
+
+			if (!order) return json({ error: "Order not found" }, 404);
 
 			// Ingest as active Job into jobs queue
 			const linkedJob: Job = {
@@ -335,11 +414,24 @@ export default {
 			};
 			jobs = [linkedJob, ...jobs];
 
-			orders[orderIndex] = {
+			order = {
 				...order,
 				status: "ai_fixing",
 				aiStage: "Developer",
 			};
+			if (orderIndex !== -1) orders[orderIndex] = order;
+
+			if (sql) {
+				try {
+					await sql`
+						UPDATE orders 
+						SET status = 'ai_fixing', ai_stage = 'Developer' 
+						WHERE id = ${id};
+					`;
+				} catch (err: any) {
+					console.error("Neon UPDATE start-fixing error:", err);
+				}
+			}
 
 			logs.unshift({
 				id: `LOG-${Math.floor(1000 + Math.random() * 9000)}`,
@@ -351,56 +443,104 @@ export default {
 				duration: "0.8s",
 			});
 
-			return json({ success: true, order: orders[orderIndex], job: linkedJob });
+			return json({ success: true, order, job: linkedJob });
 		}
 
 		// Close order & purge workspace: POST /api/orders/:id/close
 		if (path.match(/^\/api\/orders\/[^/]+\/close$/) && method === "POST") {
 			const id = path.split("/")[3];
+			const sql = getDb(env);
 			const orderIndex = orders.findIndex((o) => o.id === id);
-			if (orderIndex === -1) return json({ error: "Order not found" }, 404);
 
-			orders[orderIndex] = {
-				...orders[orderIndex],
+			let order: LifecycleOrder | null = orderIndex !== -1 ? orders[orderIndex] : null;
+
+			if (sql && !order) {
+				try {
+					const res = await sql`SELECT * FROM orders WHERE id = ${id};`;
+					if (res.length > 0) order = res[0] as any;
+				} catch (err) {
+					console.error(err);
+				}
+			}
+
+			if (!order) return json({ error: "Order not found" }, 404);
+
+			order = {
+				...order,
 				status: "job_closed",
 				retentionExpires: "Akses Dicabut & Workspace Dihapus",
 				workspaceDestroyed: true,
 			};
+			if (orderIndex !== -1) orders[orderIndex] = order;
+
+			if (sql) {
+				try {
+					await sql`
+						UPDATE orders 
+						SET status = 'job_closed', retention_expires = 'Akses Dicabut & Workspace Dihapus', workspace_destroyed = TRUE 
+						WHERE id = ${id};
+					`;
+				} catch (err: any) {
+					console.error("Neon UPDATE close error:", err);
+				}
+			}
 
 			logs.unshift({
 				id: `LOG-${Math.floor(1000 + Math.random() * 9000)}`,
 				timestamp: new Date().toLocaleTimeString("id-ID"),
 				level: "success",
 				agent: "Security Guard",
-				repo: orders[orderIndex].repoUrl,
+				repo: order.repoUrl,
 				message: `Order ${id} closed: Zero-retention purge completed. Token revoked.`,
 				duration: "0.5s",
 			});
 
-			return json({ success: true, order: orders[orderIndex] });
+			return json({ success: true, order });
 		}
 
 		// Standard Single Order CRUD: /api/orders/:id
 		if (path.startsWith("/api/orders/")) {
 			const id = path.replace("/api/orders/", "");
+			const sql = getDb(env);
 			const orderIndex = orders.findIndex((o) => o.id === id);
 
-			if (orderIndex === -1) {
-				return json({ error: "Order not found" }, 404);
-			}
-
 			if (method === "GET") {
+				if (sql) {
+					try {
+						const res = await sql`SELECT * FROM orders WHERE id = ${id};`;
+						if (res.length > 0) return json(res[0]);
+					} catch (err) {
+						console.error(err);
+					}
+				}
+				if (orderIndex === -1) return json({ error: "Order not found" }, 404);
 				return json(orders[orderIndex]);
 			}
 
 			if (method === "PATCH") {
 				const body: any = await request.json().catch(() => ({}));
-				orders[orderIndex] = { ...orders[orderIndex], ...body };
-				return json({ success: true, order: orders[orderIndex] });
+				if (orderIndex !== -1) {
+					orders[orderIndex] = { ...orders[orderIndex], ...body };
+				}
+				if (sql) {
+					try {
+						if (body.status) await sql`UPDATE orders SET status = ${body.status} WHERE id = ${id};`;
+					} catch (err) {
+						console.error(err);
+					}
+				}
+				return json({ success: true, message: `Order ${id} updated` });
 			}
 
 			if (method === "DELETE") {
 				orders = orders.filter((o) => o.id !== id);
+				if (sql) {
+					try {
+						await sql`DELETE FROM orders WHERE id = ${id};`;
+					} catch (err) {
+						console.error(err);
+					}
+				}
 				return json({ success: true, message: `Order ${id} deleted` });
 			}
 		}
