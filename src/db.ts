@@ -102,4 +102,12 @@ export async function initDbSchema(sql: NeonQueryFunction<false, false>) {
 			created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 		);
 	`;
+
+	await sql`
+		CREATE TABLE IF NOT EXISTS settings (
+			key VARCHAR(64) PRIMARY KEY,
+			value JSONB NOT NULL,
+			updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+		);
+	`;
 }

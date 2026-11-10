@@ -1396,6 +1396,70 @@ export default {
 			}
 		}
 
+		// 10. Workspace Settings API (/api/settings)
+		if (path === "/api/settings") {
+			const sql = getDb(env);
+
+			const defaultSettings = {
+				workspaceName: "RAFA Company",
+				neuronsBudget: "100,000",
+				apiKey: "sk-ant-api03-92f8a1...491b",
+				autoApproveLowRisk: true,
+				requireQaPass: true,
+				llmModel: "@cf/meta/llama-3.2-3b-instruct",
+				clusterStatus: "Production Cluster Active",
+			};
+
+			if (method === "GET") {
+				if (sql) {
+					try {
+						const res = await sql`SELECT value FROM settings WHERE key = 'workspace';`;
+						if (res.length > 0 && res[0].value) {
+							return json({ success: true, settings: { ...defaultSettings, ...res[0].value } });
+						}
+					} catch (e: any) {
+						console.error("Neon GET settings error:", e);
+					}
+				}
+				return json({ success: true, settings: defaultSettings });
+			}
+
+			if (method === "POST" || method === "PATCH") {
+				const body: any = await request.json().catch(() => ({}));
+				let updatedSettings = { ...defaultSettings, ...body };
+
+				if (sql) {
+					try {
+						const existing = await sql`SELECT value FROM settings WHERE key = 'workspace';`;
+						if (existing.length > 0 && existing[0].value) {
+							updatedSettings = { ...defaultSettings, ...existing[0].value, ...body };
+						}
+
+						await sql`
+							INSERT INTO settings (key, value, updated_at)
+							VALUES ('workspace', ${JSON.stringify(updatedSettings)}::jsonb, NOW())
+							ON CONFLICT (key) DO UPDATE
+							SET value = ${JSON.stringify(updatedSettings)}::jsonb, updated_at = NOW();
+						`;
+					} catch (e: any) {
+						console.error("Neon UPDATE settings error:", e);
+					}
+				}
+
+				logs.unshift({
+					id: `LOG-${Math.floor(1000 + Math.random() * 9000)}`,
+					timestamp: new Date().toLocaleTimeString("id-ID"),
+					level: "success",
+					agent: "Security Guard",
+					repo: "Workspace Config",
+					message: "Workspace settings updated and synced to cluster",
+					duration: "0.1s",
+				});
+
+				return json({ success: true, message: "Pengaturan berhasil disimpan", settings: updatedSettings });
+			}
+		}
+
 		return json({ error: "Endpoint not found" }, 404);
 	},
 } satisfies ExportedHandler<Env>;
