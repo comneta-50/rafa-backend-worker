@@ -1360,29 +1360,56 @@ export default {
 			try {
 				let prompt = "Halo, jelaskan bagaimana Anda dapat membantu memperbaiki bug kode.";
 				let codeSnippet = "";
+				let chosenModel = "@cf/meta/llama-3.2-3b-instruct";
+
+				// Cek default model dari database settings jika ada
+				const sql = getDb(env);
+				if (sql) {
+					try {
+						const res = await sql`SELECT value FROM settings WHERE key = 'workspace';`;
+						if (res.length > 0 && res[0].value && res[0].value.llmModel) {
+							chosenModel = res[0].value.llmModel;
+						}
+					} catch (e) {
+						// ignore
+					}
+				}
 
 				if (method === "POST") {
 					const body: any = await request.json().catch(() => ({}));
 					if (body.prompt) prompt = body.prompt;
 					if (body.code) codeSnippet = body.code;
+					if (body.model) chosenModel = body.model;
 				} else {
 					const qPrompt = url.searchParams.get("prompt");
 					if (qPrompt) prompt = qPrompt;
+					const qModel = url.searchParams.get("model");
+					if (qModel) chosenModel = qModel;
 				}
 
 				const fullPrompt = codeSnippet
 					? `Kamu adalah AI Bug Fixing & Code Reviewer Engineer. Analisis bug dan berikan solusi kode perbaikan untuk kode berikut:\n\nKode:\n\`\`\`\n${codeSnippet}\n\`\`\`\n\nInstruksi:\n${prompt}`
 					: `Kamu adalah AI Bug Fixing & Code Reviewer Engineer untuk Rafa Company Platform. Jawab permintaan berikut dengan ringkas, jelas, dan fokus pada solusi engineering/bugfix:\n\n${prompt}`;
 
-				const aiResult = await env.AI.run("@cf/meta/llama-3.2-3b-instruct", {
-					prompt: fullPrompt,
-					max_tokens: 1024,
-				});
+				let aiResult: any;
+				// Panggil model sesuai arsitektur (GLM menggunakan format messages / prompt)
+				try {
+					aiResult = await env.AI.run(chosenModel as any, {
+						prompt: fullPrompt,
+						max_tokens: 1024,
+					});
+				} catch (err: any) {
+					// Fallback ke messages array untuk model tipe GLM/Chat
+					aiResult = await env.AI.run(chosenModel as any, {
+						messages: [{ role: "user", content: fullPrompt }],
+						max_tokens: 1024,
+					});
+				}
 
 				return json({
 					success: true,
 					prompt,
-					model: "@cf/meta/llama-3.2-3b-instruct",
+					model: chosenModel,
 					result: aiResult,
 				});
 			} catch (error: any) {
