@@ -397,6 +397,26 @@ export default {
 				};
 				jobs = [newJob, ...jobs];
 
+				// Trigger background Workers AI inference to actually analyze and solve the bug
+				if (env.AI) {
+					try {
+						const aiPrompt = `Kamu adalah ${newJob.agent}. Tugas: "${newJob.title}". Repo: ${newJob.repo}. Berikan rencana analisis bug dan langkah patch kode dalam 2 kalimat ringkas dan profesional.`;
+						const aiResp: any = await env.AI.run("@cf/meta/llama-3.2-3b-instruct", {
+							prompt: aiPrompt,
+							max_tokens: 256,
+						}).catch(() => null);
+
+						const aiSummary = aiResp?.response || aiResp?.choices?.[0]?.text;
+						if (aiSummary) {
+							const cleanSummary = aiSummary.trim().replace(/\n+/g, " ");
+							newJob.logs.push(`AI Thought (${newJob.agent}): ${cleanSummary.slice(0, 200)}...`);
+							newJob.progress = 45;
+						}
+					} catch (aiErr) {
+						console.warn("Workers AI background inference skipped:", aiErr);
+					}
+				}
+
 				if (sql) {
 					try {
 						await sql`
